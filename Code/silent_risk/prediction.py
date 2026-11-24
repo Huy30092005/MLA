@@ -21,7 +21,9 @@
 # Run from anywhere:  python silent_risk/predict_h.py
 # Output:             h_set_predictions.csv (repo root)
 
+import argparse
 from pathlib import Path
+from pprint import pprint
 
 import numpy as np
 import pandas as pd
@@ -45,9 +47,66 @@ N_SPLITS, N_REPEATS, SEED = 5, 5, 42
 
 
 # ---------------------------------------------------------------- data
-def load_h_set():
+def load_raw():
+    """The full dataset exactly as in dataset/data.csv (all columns, all students)."""
     df = pd.read_csv(FILE_PATH, sep=';')
     df.columns = df.columns.str.strip()
+    return df
+
+
+def _native(d):
+    """numpy scalars -> plain Python values (cleaner to print / serialize)."""
+    return {k: (v.item() if hasattr(v, 'item') else v) for k, v in d.items()}
+
+
+def get_student_info(row_id, include_prediction=True):
+    """Return everything known about one student.
+
+    row_id: 0-based row index in dataset/data.csv (the same `row_id` as in
+            h_set_predictions.csv).
+
+    Returns a dict:
+      row_id, target (Dropout/Graduate/Enrolled), actual_dropout (1/0),
+      in_H (bool), approval_ratio, heuristic_prediction (1 = ratio < 0.5),
+      features (every column of the row except Target, 2nd-semester ones included),
+      prediction (LR output from h_set_predictions.csv for students in H, else None).
+    """
+    df = load_raw()
+    if not 0 <= row_id < len(df):
+        raise IndexError(f"row_id must be between 0 and {len(df) - 1}, got {row_id}")
+
+    row = df.loc[row_id]
+    approved, enrolled, grade = row[APPROVED_COL], row[ENROLLED_COL], row[GRADE_COL]
+    ratio = approved / enrolled if enrolled > 0 else 0.0   # same rule as heuristic.py
+
+    info = {
+        'row_id': int(row_id),
+        'target': row['Target'],
+        'actual_dropout': int(row['Target'] == 'Dropout'),
+        'in_H': bool(approved >= 4 and grade >= 12),
+        'approval_ratio': float(ratio),
+        'heuristic_prediction': int(ratio < RATIO_THRESHOLD),
+        'features': _native(row.drop('Target').to_dict()),
+        'prediction': None,
+    }
+
+    if include_prediction and info['in_H'] and OUT_PATH.exists():
+        preds = pd.read_csv(OUT_PATH).set_index('row_id')
+        if row_id in preds.index:
+            p = preds.loc[row_id]
+            info['prediction'] = _native({
+                'dropout_probability': p['dropout_probability'],
+                'risk_rank': int(p['risk_rank']),
+                'students_ranked': len(preds),
+                'predicted_dropout': int(p['predicted_dropout']),
+                'flag_top_10pct': int(p['flag_top_10pct']),
+                'flag_top_20pct': int(p['flag_top_20pct']),
+            })
+    return info
+
+
+def load_h_set():
+    df = load_raw()
 
     sem2_cols = [c for c in df.columns if '2nd sem' in c.lower()]
     df = df.drop(columns=sem2_cols)
@@ -212,4 +271,14 @@ def predict_h():
 
 
 if __name__ == '__main__':
-    predict_h()
+    parser = argparse.ArgumentParser(description="Dropout predictions for the H set.")
+    parser.add_argument('--student', type=int, metavar='ROW_ID',
+                        help="print one student's information and exit "
+                             "(prediction fields need h_set_predictions.csv, "
+                             "created by running this script without arguments)")
+    args = parser.parse_args()
+
+    if args.student is not None:
+        pprint(get_student_info(args.student), sort_dicts=False)
+    else:
+        predict_h()
